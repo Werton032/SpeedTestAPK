@@ -36,6 +36,8 @@ jobs:
           pip install --upgrade pip
           pip install buildozer cython
 
+      # НЕТ кэша — он мешал применению наших изменений SDK
+
       - name: Set up Android SDK inside buildozer directory
         run: |
           BSDK="$HOME/.buildozer/android/platform/android-sdk"
@@ -47,42 +49,53 @@ jobs:
 
           SDKMANAGER="$BSDK/cmdline-tools/latest/bin/sdkmanager"
 
-          # Принимаем лицензии
+          # Все хэши лицензий включая новые для build-tools 34-37
           mkdir -p "$BSDK/licenses"
-          printf '\n8933bad161af4178b1185d1a37fbf41ea5269c55\n84831b9409646a918e30573bab4c9c91346d8abd\n33b6a2b64607f11b759f320ef9dff4ae5c47d97a\nd975f751698a77b662f1254ddbeed3901e976f5a' \
-            > "$BSDK/licenses/android-sdk-license"
-          printf '\nd975f751698a77b662f1254ddbeed3901e976f5a' \
-            > "$BSDK/licenses/android-sdk-preview-license"
+          cat > "$BSDK/licenses/android-sdk-license" << 'HASHES'
 
-          # Устанавливаем пакеты включая build-tools 33.0.2
+8933bad161af4178b1185d1a37fbf41ea5269c55
+84831b9409646a918e30573bab4c9c91346d8abd
+33b6a2b64607f11b759f320ef9dff4ae5c47d97a
+d975f751698a77b662f1254ddbeed3901e976f5a
+e6b7c2ac7caac399c4a7a7ef99d6373bb4eded13
+601085b94cd77f0b54ff86406957099ebe79c4d6
+HASHES
+          cat > "$BSDK/licenses/android-sdk-preview-license" << 'HASHES'
+
+84831b9409646a918e30573bab4c9c91346d8abd
+d975f751698a77b662f1254ddbeed3901e976f5a
+HASHES
+          cat > "$BSDK/licenses/android-googletv-license" << 'HASHES'
+
+601085b94cd77f0b54ff86406957099ebe79c4d6
+HASHES
+
+          # Принимаем лицензии интерактивно через yes (последний резерв)
+          yes | "$SDKMANAGER" --sdk_root="$BSDK" --licenses 2>/dev/null || true
+
+          # Устанавливаем build-tools 33.0.2 И 34.0.0
           "$SDKMANAGER" --sdk_root="$BSDK" \
             "platform-tools" \
             "platforms;android-33" \
-            "build-tools;33.0.2"
+            "build-tools;33.0.2" \
+            "build-tools;34.0.0" 2>&1 | tail -5
 
-          # Симлинк для старого пути который ищет buildozer
+          # Симлинк для старого пути
           mkdir -p "$BSDK/tools/bin"
           ln -sf "$SDKMANAGER" "$BSDK/tools/bin/sdkmanager"
 
-          # КЛЮЧЕВОЕ: создаём алиас папки build-tools чтобы buildozer
-          # нашёл aidl и не лез в sdkmanager за новой версией
-          # Buildozer ищет aidl в build-tools/*/aidl
-          # Создаём папку с именем 37.0.0 которую он ожидает, но внутри — реальные файлы от 33.0.2
-          if [ -d "$BSDK/build-tools/33.0.2" ]; then
+          # Копируем build-tools под именем 37.0.0 которое ищет buildozer
+          if [ -d "$BSDK/build-tools/34.0.0" ]; then
+            cp -r "$BSDK/build-tools/34.0.0" "$BSDK/build-tools/37.0.0"
+            echo "✓ build-tools/37.0.0 создан из 34.0.0"
+          elif [ -d "$BSDK/build-tools/33.0.2" ]; then
             cp -r "$BSDK/build-tools/33.0.2" "$BSDK/build-tools/37.0.0"
-            echo "Created build-tools/37.0.0 alias from 33.0.2"
-            ls "$BSDK/build-tools/37.0.0/" | grep aidl
+            echo "✓ build-tools/37.0.0 создан из 33.0.2"
           fi
 
-          echo "SDK layout:"
-          ls "$BSDK/"
-
-      - name: Cache .buildozer
-        uses: actions/cache@v4
-        with:
-          path: .buildozer
-          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
-          restore-keys: buildozer-${{ runner.os }}-
+          echo "=== Итог SDK ==="
+          ls "$BSDK/build-tools/" 2>/dev/null || echo "build-tools пуста!"
+          ls "$BSDK/build-tools/37.0.0/" 2>/dev/null | grep -E "aidl|d8|apksigner" || echo "aidl не найден!"
 
       - name: Build APK
         run: |
