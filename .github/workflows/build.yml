@@ -1,6 +1,10 @@
-name: Build APK
+name: Build Android APK
 
 on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
@@ -9,29 +13,143 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      # ── 1. Код ──────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Build APK via Kivy Docker
+      # ── 2. Python ───────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ── 3. Java 17 ──────────────────────────────────
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ── 4. Системные пакеты ─────────────────────────
+      - name: Install system dependencies
         run: |
-          docker run --rm \
-            -v ${{ github.workspace }}:/home/user/hostcwd \
-            kivy/buildozer:latest \
-            android debug 2>&1 | tee build.log
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            git zip unzip wget curl \
+            build-essential cmake \
+            libffi-dev libssl-dev \
+            python3-dev \
+            autoconf automake libtool \
+            libltdl-dev \
+            pkg-config \
+            zlib1g-dev \
+            libgstreamer1.0-dev \
+            gstreamer1.0-plugins-base \
+            libsdl2-dev libsdl2-image-dev \
+            libsdl2-mixer-dev libsdl2-ttf-dev \
+            lld
 
+      # ── 5. Android SDK ──────────────────────────────
+      - name: Set up Android SDK
+        run: |
+          mkdir -p $HOME/android-sdk/cmdline-tools
+          cd $HOME/android-sdk/cmdline-tools
+
+          wget -q \
+            https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip \
+            -O cmdline-tools.zip
+
+          unzip -q cmdline-tools.zip
+          mv cmdline-tools latest
+          rm cmdline-tools.zip
+
+          echo "ANDROID_HOME=$HOME/android-sdk"       >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$HOME/android-sdk"   >> $GITHUB_ENV
+          echo "$HOME/android-sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$HOME/android-sdk/platform-tools"     >> $GITHUB_PATH
+
+      # ── 6. Android лицензии + пакеты ────────────────
+      - name: Accept SDK licenses and install packages
+        run: |
+          export ANDROID_HOME=$HOME/android-sdk
+          export ANDROID_SDK_ROOT=$HOME/android-sdk
+          export PATH="$HOME/android-sdk/cmdline-tools/latest/bin:$PATH"
+
+          # Принимаем лицензии без yes | ... (ломало pipe)
+          mkdir -p $ANDROID_HOME/licenses
+          echo "8933bad161af4178b1185d1a37fbf41ea5269c55" \
+            > $ANDROID_HOME/licenses/android-sdk-license
+          echo "d56f5187479451eabf01fb78af6dfcb131a6481e" \
+            >> $ANDROID_HOME/licenses/android-sdk-license
+          echo "24333f8a63b6825ea9c5514f83c2829b004d1fee" \
+            >> $ANDROID_HOME/licenses/android-sdk-license
+          echo "84831b9409646a918e30573bab4c9c91346d8abd" \
+            > $ANDROID_HOME/licenses/android-sdk-preview-license
+
+          sdkmanager --sdk_root=$ANDROID_HOME \
+            "platform-tools" \
+            "platforms;android-33" \
+            "build-tools;33.0.2" \
+            "ndk;25.2.9519653" 2>&1 | tail -5
+
+      # ── 7. Buildozer ────────────────────────────────
+      - name: Install Buildozer and Cython
+        run: |
+          pip install --upgrade pip wheel setuptools
+          pip install \
+            buildozer==1.5.0 \
+            cython==0.29.37 \
+            kivy==2.3.0
+
+      # ── 8. Кэш p4a / .buildozer ─────────────────────
+      - name: Cache buildozer global dir
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            ~/.gradle
+          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            buildozer-${{ runner.os }}-
+
+      # ── 9. Сборка ────────────────────────────────────
+      - name: Build APK
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/25.2.9519653
+        run: |
+          # Buildozer пишет в buildozer.log
+          buildozer -v android debug 2>&1 | tee build.log
+          echo "BUILD_EXIT=${PIPESTATUS[0]}" >> $GITHUB_ENV
+
+      # ── 10. Артефакт: лог (всегда) ──────────────────
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
           path: build.log
+          retention-days: 7
 
-      - name: Upload APK
+      # ── 11. Найти APK ────────────────────────────────
+      - name: Locate APK
         if: success()
+        run: |
+          APK=$(find . -name "*.apk" | head -1)
+          echo "APK_PATH=$APK" >> $GITHUB_ENV
+          echo "Found APK: $APK"
+
+      # ── 12. Артефакт: APK ────────────────────────────
+      - name: Upload APK
+        if: success() && env.APK_PATH != ''
         uses: actions/upload-artifact@v4
         with:
-          name: SpeedTestPro-APK
-          path: bin/*.apk
+          name: NetSpeedPro-debug
+          path: ${{ env.APK_PATH }}
+          retention-days: 14
 
-      - name: Show log tail on failure
+      # ── 13. Провал = явный вывод хвоста лога ────────
+      - name: Show tail of log on failure
         if: failure()
-        run: tail -200 build.log || true
+        run: tail -100 build.log || true
