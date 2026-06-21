@@ -1,4 +1,4 @@
-\from kivy.app import App
+from kivy.app import App
 from kivy.lang import Builder
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
@@ -9,6 +9,7 @@ from kivy.clock import Clock
 from kivy.network.urlrequest import UrlRequest
 from kivy.utils import platform
 import json
+
 
 KV = '''
 #:import dp kivy.metrics.dp
@@ -111,7 +112,7 @@ KV = '''
         spacing: dp(10)
 
         Label:
-            text: '⚡'
+            text: 'S'
             size_hint_x: None
             width: dp(40)
             font_size: '30sp'
@@ -130,7 +131,7 @@ KV = '''
                 valign: 'middle'
 
             Label:
-                text: 'Android edition • стиль Ookla'
+                text: 'Android edition'
                 font_size: '12sp'
                 color: 0.55, 0.63, 0.76, 1
                 text_size: self.size
@@ -148,10 +149,11 @@ KV = '''
             center: self.center
 
         Label:
-            text: '⚡'
-            font_size: '68sp'
+            text: 'NET'
+            font_size: '34sp'
+            bold: True
             color: 0.0, 0.85, 1.0, 1
-            center: self.center_x, self.center_y + dp(12)
+            center: self.center_x, self.center_y + dp(8)
 
         Label:
             text: 'LIVE NETWORK'
@@ -241,7 +243,7 @@ KV = '''
                 radius: [dp(20),]
 
     Label:
-        text: 'Для точного теста скорости кнопка откроет Fast.com во внешнем браузере'
+        text: 'Кнопка откроет Fast.com во внешнем браузере'
         size_hint_y: None
         height: dp(40)
         font_size: '11sp'
@@ -344,14 +346,13 @@ class RootLayout(BoxLayout):
 
         self.stop_loading_text()
         self.ids.status_label.text = "Не удалось получить данные"
-        self.ids.error_label.text = "Проверь интернет или попробуй ещё раз через кнопку «Обновить данные»"
+        self.ids.error_label.text = "Проверь интернет или нажми «Обновить данные»"
         self.ids.card_state.value = "Ошибка сети"
 
     def _normalize_result(self, result):
         if not isinstance(result, dict):
             raise ValueError("Некорректный ответ сервера")
 
-        # Формат ipwho.is
         if "success" in result:
             if result.get("success") is False:
                 raise ValueError(result.get("message", "Сервис вернул ошибку"))
@@ -365,7 +366,6 @@ class RootLayout(BoxLayout):
                 "isp": connection.get("isp") or connection.get("org") or "—"
             }
 
-        # Формат ipapi.co
         return {
             "ip": result.get("ip", "—"),
             "country": result.get("country_name", "—"),
@@ -384,36 +384,13 @@ class RootLayout(BoxLayout):
         self.ids.card_isp.value = str(data.get("isp", "—"))
         self.ids.card_state.value = "Готово"
 
-        self.ids.status_label.text = "Соединение успешно определено"
+        self.ids.status_label.text = "Соединение определено"
         self.ids.error_label.text = ""
-
-        for widget in [
-            self.ids.card_ip,
-            self.ids.card_country,
-            self.ids.card_city,
-            self.ids.card_isp,
-            self.ids.card_region,
-            self.ids.card_state
-        ]:
-            widget.opacity = 0
-
-        delay = 0
-        for widget in [
-            self.ids.card_ip,
-            self.ids.card_country,
-            self.ids.card_city,
-            self.ids.card_isp,
-            self.ids.card_region,
-            self.ids.card_state
-        ]:
-            anim = Animation(opacity=1, duration=0.25, t='out_quad')
-            Clock.schedule_once(lambda dt, w=widget, a=anim: a.start(w), delay)
-            delay += 0.05
 
     def open_speedtest(self):
         try:
             self.ids.status_label.text = "Открываю Fast.com..."
-            self.ids.card_state.value = "Запуск теста"
+            self.ids.card_state.value = "Запуск"
 
             if platform == "android":
                 from jnius import autoclass, cast
@@ -429,8 +406,8 @@ class RootLayout(BoxLayout):
                 webbrowser.open("https://fast.com")
         except Exception:
             self.ids.status_label.text = "Не удалось открыть браузер"
-            self.ids.card_state.value = "Ошибка запуска"
-            self.ids.error_label.text = "Браузер не открылся. Попробуй установить Chrome или другой браузер."
+            self.ids.card_state.value = "Ошибка"
+            self.ids.error_label.text = "Установи браузер и попробуй снова."
 
 
 Builder.load_string(KV)
