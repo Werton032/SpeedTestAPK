@@ -2,17 +2,25 @@
 title = Speed Test Pro
 package.name = speedtestpro
 package.domain = org.test
+
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
+
 version = 1.0
-requirements = python3,kivy==2.2.1,kivymd==1.2.0,pillow,certifi
+
+requirements = python3,kivy,requests,speedtest-cli
+
 orientation = portrait
 fullscreen = 0
+
 android.permissions = INTERNET,ACCESS_NETWORK_STATE
 android.api = 33
 android.minapi = 21
+android.ndk = 25b
 android.archs = arm64-v8a
+android.accept_sdk_license = True
 android.allow_backup = True
+
 log_level = 2
 
 [buildozer]
