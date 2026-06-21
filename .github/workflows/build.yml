@@ -26,44 +26,49 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            build-essential git \
-            python3-dev \
+            build-essential git python3-dev \
             autoconf automake libtool pkg-config cmake \
-            libffi-dev libssl-dev \
-            zlib1g-dev \
-            zip unzip lzma \
-            ccache
+            libffi-dev libssl-dev zlib1g-dev \
+            zip unzip lzma ccache
 
-      - name: Set up Android SDK (with pre-accepted licenses)
+      - name: Install Buildozer and Cython
         run: |
-          SDK_ROOT="$HOME/android-sdk"
-          mkdir -p "$SDK_ROOT/cmdline-tools"
-          cd "$SDK_ROOT/cmdline-tools"
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdline-tools.zip
-          unzip -q cmdline-tools.zip
-          mv cmdline-tools latest
+          pip install --upgrade pip
+          pip install buildozer cython
 
-          export ANDROID_HOME="$SDK_ROOT"
-          export ANDROID_SDK_ROOT="$SDK_ROOT"
-          export PATH="$SDK_ROOT/cmdline-tools/latest/bin:$SDK_ROOT/platform-tools:$PATH"
+      - name: Set up Android SDK inside buildozer directory
+        run: |
+          # Именно сюда buildozer смотрит — создаём SDK здесь
+          BSDK="$HOME/.buildozer/android/platform/android-sdk"
+          mkdir -p "$BSDK/cmdline-tools"
 
-          # Принимаем лицензии ДО установки пакетов
-          mkdir -p "$SDK_ROOT/licenses"
+          # Скачиваем command-line tools
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdline-tools.zip
+          unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdtools
+          mv /tmp/cmdtools/cmdline-tools "$BSDK/cmdline-tools/latest"
+
+          SDKMANAGER="$BSDK/cmdline-tools/latest/bin/sdkmanager"
+
+          # Принимаем лицензии
+          mkdir -p "$BSDK/licenses"
           printf '\n8933bad161af4178b1185d1a37fbf41ea5269c55\n84831b9409646a918e30573bab4c9c91346d8abd\n33b6a2b64607f11b759f320ef9dff4ae5c47d97a\nd975f751698a77b662f1254ddbeed3901e976f5a' \
-            > "$SDK_ROOT/licenses/android-sdk-license"
+            > "$BSDK/licenses/android-sdk-license"
           printf '\nd975f751698a77b662f1254ddbeed3901e976f5a' \
-            > "$SDK_ROOT/licenses/android-sdk-preview-license"
+            > "$BSDK/licenses/android-sdk-preview-license"
 
-          # Устанавливаем нужные пакеты явно, пока лицензии приняты
-          sdkmanager --sdk_root="$SDK_ROOT" \
+          # Устанавливаем нужные пакеты
+          "$SDKMANAGER" --sdk_root="$BSDK" \
             "platform-tools" \
             "platforms;android-33" \
             "build-tools;33.0.2"
 
-          echo "ANDROID_HOME=$SDK_ROOT" >> $GITHUB_ENV
-          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> $GITHUB_ENV
-          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
-          echo "$SDK_ROOT/platform-tools" >> $GITHUB_PATH
+          # Создаём симлинк tools/bin/sdkmanager — именно этот путь ищет buildozer
+          mkdir -p "$BSDK/tools/bin"
+          ln -sf "$SDKMANAGER" "$BSDK/tools/bin/sdkmanager"
+
+          echo "SDK setup done:"
+          ls "$BSDK/"
+          ls "$BSDK/tools/bin/"
 
       - name: Cache .buildozer
         uses: actions/cache@v4
@@ -72,26 +77,7 @@ jobs:
           key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
           restore-keys: buildozer-${{ runner.os }}-
 
-      - name: Install Buildozer and Cython
-        run: |
-          pip install --upgrade pip
-          pip install buildozer cython
-
-      - name: Patch buildozer SDK path and pre-accept licenses
-        run: |
-          # Указываем buildozer использовать наш уже установленный SDK
-          # вместо того чтобы скачивать свой
-          mkdir -p ~/.buildozer/android/platform
-          ln -sf "$ANDROID_SDK_ROOT" ~/.buildozer/android/platform/android-sdk
-
-          # Копируем лицензии в папку buildozer (на случай если он их ищет там)
-          mkdir -p ~/.buildozer/android/platform/android-sdk/licenses
-          cp "$ANDROID_SDK_ROOT/licenses/"* ~/.buildozer/android/platform/android-sdk/licenses/ 2>/dev/null || true
-
       - name: Build APK
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
         run: |
           buildozer android debug 2>&1 | tee build.log
 
