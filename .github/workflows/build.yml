@@ -6,100 +6,17 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Install system dependencies
+      - name: Build APK via Kivy Docker
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            build-essential git python3-dev \
-            autoconf automake libtool pkg-config cmake \
-            libffi-dev libssl-dev zlib1g-dev \
-            zip unzip lzma ccache
-
-      - name: Install Buildozer and Cython
-        run: |
-          pip install --upgrade pip
-          pip install buildozer cython
-
-      # НЕТ кэша — он мешал применению наших изменений SDK
-
-      - name: Set up Android SDK inside buildozer directory
-        run: |
-          BSDK="$HOME/.buildozer/android/platform/android-sdk"
-          mkdir -p "$BSDK/cmdline-tools"
-
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdline-tools.zip
-          unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdtools
-          mv /tmp/cmdtools/cmdline-tools "$BSDK/cmdline-tools/latest"
-
-          SDKMANAGER="$BSDK/cmdline-tools/latest/bin/sdkmanager"
-
-          # Все хэши лицензий включая новые для build-tools 34-37
-          mkdir -p "$BSDK/licenses"
-          cat > "$BSDK/licenses/android-sdk-license" << 'HASHES'
-
-8933bad161af4178b1185d1a37fbf41ea5269c55
-84831b9409646a918e30573bab4c9c91346d8abd
-33b6a2b64607f11b759f320ef9dff4ae5c47d97a
-d975f751698a77b662f1254ddbeed3901e976f5a
-e6b7c2ac7caac399c4a7a7ef99d6373bb4eded13
-601085b94cd77f0b54ff86406957099ebe79c4d6
-HASHES
-          cat > "$BSDK/licenses/android-sdk-preview-license" << 'HASHES'
-
-84831b9409646a918e30573bab4c9c91346d8abd
-d975f751698a77b662f1254ddbeed3901e976f5a
-HASHES
-          cat > "$BSDK/licenses/android-googletv-license" << 'HASHES'
-
-601085b94cd77f0b54ff86406957099ebe79c4d6
-HASHES
-
-          # Принимаем лицензии интерактивно через yes (последний резерв)
-          yes | "$SDKMANAGER" --sdk_root="$BSDK" --licenses 2>/dev/null || true
-
-          # Устанавливаем build-tools 33.0.2 И 34.0.0
-          "$SDKMANAGER" --sdk_root="$BSDK" \
-            "platform-tools" \
-            "platforms;android-33" \
-            "build-tools;33.0.2" \
-            "build-tools;34.0.0" 2>&1 | tail -5
-
-          # Симлинк для старого пути
-          mkdir -p "$BSDK/tools/bin"
-          ln -sf "$SDKMANAGER" "$BSDK/tools/bin/sdkmanager"
-
-          # Копируем build-tools под именем 37.0.0 которое ищет buildozer
-          if [ -d "$BSDK/build-tools/34.0.0" ]; then
-            cp -r "$BSDK/build-tools/34.0.0" "$BSDK/build-tools/37.0.0"
-            echo "✓ build-tools/37.0.0 создан из 34.0.0"
-          elif [ -d "$BSDK/build-tools/33.0.2" ]; then
-            cp -r "$BSDK/build-tools/33.0.2" "$BSDK/build-tools/37.0.0"
-            echo "✓ build-tools/37.0.0 создан из 33.0.2"
-          fi
-
-          echo "=== Итог SDK ==="
-          ls "$BSDK/build-tools/" 2>/dev/null || echo "build-tools пуста!"
-          ls "$BSDK/build-tools/37.0.0/" 2>/dev/null | grep -E "aidl|d8|apksigner" || echo "aidl не найден!"
-
-      - name: Build APK
-        run: |
-          buildozer android debug 2>&1 | tee build.log
+          docker run --rm \
+            -v ${{ github.workspace }}:/home/user/hostcwd \
+            kivy/buildozer:latest \
+            android debug 2>&1 | tee build.log
 
       - name: Upload build log
         if: always()
