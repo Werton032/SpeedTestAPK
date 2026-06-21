@@ -1,733 +1,753 @@
 """
-Speed Test Pro — чистый Kivy, без KivyMD.
-Совместим с Android через Buildozer + python-for-android.
+NetSpeed Pro — Android Speed Test App
+Stack: Python 3.11 + Kivy 2.3.0 + Buildozer
+No speedtest-cli. No requests. No KivyMD.
+Pure Kivy + urllib + threading.
 """
 
 import threading
-import json
 import time
-import socket
-import urllib.request
-import ssl
+import json
 import math
+import socket
+from urllib.request import urlopen, Request
+from urllib.error import URLError, HTTPError
+
+import kivy
+kivy.require('2.3.0')
 
 from kivy.app import App
-from kivy.clock import Clock
-from kivy.properties import StringProperty, NumericProperty, BooleanProperty
 from kivy.uix.widget import Widget
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.scrollview import ScrollView
+from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.label import Label
 from kivy.uix.button import Button
+from kivy.uix.scrollview import ScrollView
 from kivy.graphics import (
-    Color, RoundedRectangle, Ellipse, Line,
-    PushMatrix, PopMatrix, Rotate, Translate,
+    Color, Ellipse, Line, Rectangle,
+    RoundedRectangle
 )
 from kivy.animation import Animation
-from kivy.core.window import Window
+from kivy.clock import Clock
 from kivy.metrics import dp, sp
-from kivy.lang import Builder
+from kivy.properties import (
+    NumericProperty, StringProperty,
+    BooleanProperty, ListProperty
+)
+from kivy.core.window import Window
+from kivy.utils import get_color_from_hex
 
+# ── Цвета ──────────────────────────────────────────────
+C_BG        = get_color_from_hex('#0B1220')
+C_CARD      = get_color_from_hex('#151D31')
+C_CYAN      = get_color_from_hex('#00D9FF')
+C_GREEN     = get_color_from_hex('#00FFA3')
+C_WHITE     = get_color_from_hex('#FFFFFF')
+C_MUTED     = get_color_from_hex('#94A3B8')
+C_ACCENT2   = get_color_from_hex('#7C3AED')
+C_ERROR     = get_color_from_hex('#FF4444')
+C_DARK_CARD = get_color_from_hex('#0D1526')
 
-# ──────────────────────────────────────────────
-# Цветовая палитра
-# ──────────────────────────────────────────────
-BG       = (11/255, 18/255, 32/255, 1)
-CARD     = (21/255, 29/255, 49/255, 1)
-CYAN     = (0, 0.85, 1, 1)
-GREEN    = (0, 1, 0.64, 1)
-WHITE    = (1, 1, 1, 1)
-MUTED    = (0.57, 0.64, 0.73, 1)
-BTN_TEXT = (11/255, 18/255, 32/255, 1)
-ORANGE   = (1, 0.6, 0.1, 1)
+Window.clearcolor = C_BG
 
-# ──────────────────────────────────────────────
-# Speed-test endpoints
-# ──────────────────────────────────────────────
-DOWNLOAD_URLS = [
-    "https://speed.hetzner.de/10MB.bin",
-    "https://speedtest.tele2.net/10MB.zip",
+# ── Константы теста ────────────────────────────────────
+PING_HOSTS = [
+    ('8.8.8.8',    53),
+    ('1.1.1.1',    53),
+    ('208.67.222.222', 53),
 ]
-UPLOAD_URL = "https://httpbin.org/post"
-IP_API_PRIMARY   = "https://ipwho.is/"
-IP_API_SECONDARY = "https://ipapi.co/json/"
+DOWNLOAD_URLS = [
+    'http://speedtest.ftp.otenet.gr/files/test1Mb.db',
+    'http://ipv4.download.thinkbroadband.com/1MB.zip',
+    'http://proof.ovh.net/files/1Mb.dat',
+]
+UPLOAD_URL   = 'https://httpbin.org/post'
+DOWNLOAD_SEC = 8    # секунд на download
+UPLOAD_SEC   = 6    # секунд на upload
+CHUNK        = 4096
+
+# ── IP API ─────────────────────────────────────────────
+IP_APIS = [
+    'https://ipwho.is/',
+    'https://ipapi.co/json/',
+]
 
 
-# ══════════════════════════════════════════════
-# Вспомогательный виджет: карточка (RoundedRect)
-# ══════════════════════════════════════════════
-class Card(BoxLayout):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.orientation = "vertical"
-        self.padding = [dp(16), dp(14), dp(16), dp(14)]
-        self.spacing = dp(6)
-        with self.canvas.before:
-            Color(*CARD)
-            self._rect = RoundedRectangle(
-                pos=self.pos, size=self.size, radius=[dp(20)]
+# ══════════════════════════════════════════════════════
+#  Утилиты сети
+# ══════════════════════════════════════════════════════
+
+def safe_fetch_json(url: str, timeout: int = 8) -> dict | None:
+    """Скачать JSON без внешних библиотек. None при ошибке."""
+    try:
+        req = Request(url, headers={'User-Agent': 'NetSpeedPro/1.0'})
+        with urlopen(req, timeout=timeout) as r:
+            raw = r.read().decode('utf-8', errors='replace')
+            return json.loads(raw)
+    except Exception:
+        return None
+
+
+def fetch_ip_info() -> dict:
+    """Пробуем несколько API по очереди."""
+    for url in IP_APIS:
+        data = safe_fetch_json(url)
+        if not data:
+            continue
+
+        # Нормализуем разные форматы ответа
+        ip  = (data.get('ip') or data.get('query') or '—')
+        isp = (data.get('connection', {}).get('isp')
+               or data.get('org')
+               or data.get('isp')
+               or '—')
+        return {
+            'ip':      ip,
+            'country': data.get('country') or data.get('country_name') or '—',
+            'region':  data.get('region') or '—',
+            'city':    data.get('city') or '—',
+            'isp':     isp,
+        }
+    return {'ip': '—', 'country': '—', 'region': '—',
+            'city': '—', 'isp': '—'}
+
+
+def measure_ping(host: str, port: int, attempts: int = 4) -> float:
+    """TCP-ping. Возвращает средний ms или -1."""
+    times = []
+    for _ in range(attempts):
+        try:
+            t0 = time.perf_counter()
+            s = socket.create_connection((host, port), timeout=3)
+            s.close()
+            times.append((time.perf_counter() - t0) * 1000)
+            time.sleep(0.05)
+        except Exception:
+            pass
+    return round(sum(times) / len(times), 1) if times else -1.0
+
+
+def best_ping() -> float:
+    """Пингуем несколько хостов, берём лучший."""
+    results = []
+    for host, port in PING_HOSTS:
+        v = measure_ping(host, port)
+        if v > 0:
+            results.append(v)
+    return min(results) if results else -1.0
+
+
+def measure_download(cb_speed, stop_event) -> float:
+    """
+    Качаем чанками N секунд, считаем Mbps.
+    cb_speed(mbps) вызывается каждые ~300ms.
+    """
+    deadline = time.perf_counter() + DOWNLOAD_SEC
+    total    = 0
+    window_bytes = 0
+    window_t     = time.perf_counter()
+
+    url = DOWNLOAD_URLS[0]
+    try:
+        req = Request(url, headers={'User-Agent': 'NetSpeedPro/1.0'})
+        with urlopen(req, timeout=15) as r:
+            while time.perf_counter() < deadline and not stop_event.is_set():
+                chunk = r.read(CHUNK)
+                if not chunk:
+                    # файл закончился — качаем по новой
+                    r.close()
+                    req2 = Request(url, headers={'User-Agent': 'NetSpeedPro/1.0'})
+                    r = urlopen(req2, timeout=15)
+                    continue
+                total        += len(chunk)
+                window_bytes += len(chunk)
+                now = time.perf_counter()
+                if now - window_t >= 0.3:
+                    mbps = (window_bytes * 8) / ((now - window_t) * 1_000_000)
+                    cb_speed(round(mbps, 2))
+                    window_bytes = 0
+                    window_t     = now
+    except Exception:
+        pass
+
+    elapsed = DOWNLOAD_SEC  # фиксированное окно
+    if total == 0:
+        return 0.0
+    return round((total * 8) / (elapsed * 1_000_000), 2)
+
+
+def measure_upload(cb_speed, stop_event) -> float:
+    """
+    Отправляем рандомные данные POST на httpbin.
+    cb_speed(mbps) каждые ~300ms.
+    """
+    BLOCK    = 256 * 1024   # 256 KB за раз
+    deadline = time.perf_counter() + UPLOAD_SEC
+    total    = 0
+    window_bytes = 0
+    window_t     = time.perf_counter()
+
+    payload = b'X' * BLOCK
+
+    while time.perf_counter() < deadline and not stop_event.is_set():
+        try:
+            req = Request(
+                UPLOAD_URL,
+                data=payload,
+                headers={
+                    'User-Agent':    'NetSpeedPro/1.0',
+                    'Content-Type':  'application/octet-stream',
+                    'Content-Length': str(len(payload)),
+                }
             )
-        self.bind(pos=self._update_rect, size=self._update_rect)
+            with urlopen(req, timeout=10):
+                pass
+            total        += len(payload)
+            window_bytes += len(payload)
+        except Exception:
+            break
 
-    def _update_rect(self, *_):
-        self._rect.pos  = self.pos
-        self._rect.size = self.size
+        now = time.perf_counter()
+        if now - window_t >= 0.3:
+            mbps = (window_bytes * 8) / ((now - window_t) * 1_000_000)
+            cb_speed(round(mbps, 2))
+            window_bytes = 0
+            window_t     = now
+
+    elapsed = min(time.perf_counter() - (deadline - UPLOAD_SEC), UPLOAD_SEC)
+    if total == 0 or elapsed < 0.1:
+        return 0.0
+    return round((total * 8) / (elapsed * 1_000_000), 2)
 
 
-# ══════════════════════════════════════════════
-# Gauge — круговой спидометр (canvas)
-# ══════════════════════════════════════════════
-class SpeedGauge(Widget):
-    speed_value  = NumericProperty(0)   # текущее значение для дуги
-    display_text = StringProperty("0.00")
-    unit_text    = StringProperty("Mbps")
-    stage_text   = StringProperty("")
+# ══════════════════════════════════════════════════════
+#  Gauge Widget
+# ══════════════════════════════════════════════════════
 
-    MAX_SPEED = 200.0   # максимум шкалы
-    ARC_START = 220     # угол начала дуги (градусы CCW от +X)
-    ARC_SWEEP = 280     # общий диапазон дуги
+class GaugeWidget(Widget):
+    """
+    Круговой спидометр.
+    speed_val  — текущее значение (0..max_val)
+    max_val    — максимум шкалы
+    stage_text — PING / DOWNLOAD / UPLOAD / READY
+    """
+    speed_val  = NumericProperty(0.0)
+    max_val    = NumericProperty(150.0)
+    stage_text = StringProperty('READY')
+    unit_text  = StringProperty('Mbps')
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, **kw):
+        super().__init__(**kw)
         self.bind(
-            pos=self._redraw, size=self._redraw,
-            speed_value=self._redraw,
-            display_text=self._redraw,
-            unit_text=self._redraw,
+            speed_val=self._redraw,
             stage_text=self._redraw,
+            size=self._redraw,
+            pos=self._redraw,
         )
 
     def _redraw(self, *_):
         self.canvas.clear()
-        cx = self.x + self.width / 2
-        cy = self.y + self.height / 2
-        r  = min(self.width, self.height) / 2 * 0.78
+        cx = self.center_x
+        cy = self.center_y
+        r  = min(self.width, self.height) * 0.42
 
         with self.canvas:
-            # --- фон дуги ---
-            Color(1, 1, 1, 0.07)
+            # ── фоновый круг ──────────────────────────
+            Color(*C_DARK_CARD)
+            Ellipse(pos=(cx - r, cy - r), size=(r * 2, r * 2))
+
+            # ── внешний обод ──────────────────────────
+            Color(*C_CYAN[:3], 0.18)
+            Line(circle=(cx, cy, r), width=dp(3))
+
+            # ── пустая дуга (трек) ────────────────────
+            Color(*C_MUTED[:3], 0.25)
             Line(
-                circle=(cx, cy, r,
-                        -(self.ARC_START),
-                        -(self.ARC_START - self.ARC_SWEEP)),
-                width=dp(10), cap="round",
+                ellipse=(cx - r + dp(8), cy - r + dp(8),
+                         (r - dp(8)) * 2, (r - dp(8)) * 2,
+                         225, 225 + 270),
+                width=dp(10), cap='round',
             )
 
-            # --- заполненная дуга ---
-            ratio = min(max(self.speed_value / self.MAX_SPEED, 0), 1)
-            sweep = self.ARC_SWEEP * ratio
-            if sweep > 0:
-                # Цвет зависит от скорости
-                if ratio < 0.4:
-                    Color(*CYAN)
-                elif ratio < 0.75:
-                    Color(*GREEN)
-                else:
-                    Color(*ORANGE)
+            # ── заполненная дуга ──────────────────────
+            ratio   = min(self.speed_val / max(self.max_val, 1), 1.0)
+            arc_deg = ratio * 270
+            if arc_deg > 1:
+                Color(*C_CYAN)
                 Line(
-                    circle=(cx, cy, r,
-                            -(self.ARC_START),
-                            -(self.ARC_START - sweep)),
-                    width=dp(10), cap="round",
+                    ellipse=(cx - r + dp(8), cy - r + dp(8),
+                             (r - dp(8)) * 2, (r - dp(8)) * 2,
+                             225, 225 + arc_deg),
+                    width=dp(10), cap='round',
                 )
 
-            # --- центральный текст: число ---
-            # Рисуется через Label — оверлей
-        # Label'ы добавляем программно (обновляем)
-        self._update_labels(cx, cy, r)
+            # ── деления ───────────────────────────────
+            Color(*C_MUTED[:3], 0.4)
+            for i in range(11):
+                angle = math.radians(225 + i * 27)
+                r1 = r - dp(20)
+                r2 = r - dp(28) if i % 5 == 0 else r - dp(25)
+                x1 = cx + r1 * math.cos(angle)
+                y1 = cy + r1 * math.sin(angle)
+                x2 = cx + r2 * math.cos(angle)
+                y2 = cy + r2 * math.sin(angle)
+                Line(points=[x1, y1, x2, y2], width=dp(1.2))
 
-    def _update_labels(self, cx, cy, r):
-        # Удаляем старые лейблы
-        for child in list(self.children):
-            self.remove_widget(child)
+        # Labels через canvas — используем Kivy Label внутри
+        self._draw_labels(cx, cy, r, ratio)
 
-        # Значение скорости
-        lbl_val = Label(
-            text=self.display_text,
-            font_size=sp(36),
+    def _draw_labels(self, cx, cy, r, ratio):
+        """Обновляем дочерние Label."""
+        self.clear_widgets()
+
+        # Скорость (большие цифры)
+        speed_str = f'{self.speed_val:.1f}' if self.speed_val < 100 \
+                    else f'{int(self.speed_val)}'
+        spd = Label(
+            text=speed_str,
+            font_size=sp(38),
             bold=True,
-            color=WHITE,
+            color=C_WHITE,
             size_hint=(None, None),
+            size=(r * 1.6, dp(50)),
+            pos=(cx - r * 0.8, cy),
         )
-        lbl_val.texture_update()
-        lbl_val.size = lbl_val.texture_size
-        lbl_val.pos  = (cx - lbl_val.width / 2, cy - lbl_val.height / 2 + dp(8))
-        self.add_widget(lbl_val)
+        self.add_widget(spd)
 
         # Единица
-        lbl_unit = Label(
+        unit = Label(
             text=self.unit_text,
             font_size=sp(13),
-            color=MUTED,
+            color=C_CYAN,
             size_hint=(None, None),
+            size=(r * 1.6, dp(22)),
+            pos=(cx - r * 0.8, cy - dp(22)),
         )
-        lbl_unit.texture_update()
-        lbl_unit.size = lbl_unit.texture_size
-        lbl_unit.pos  = (cx - lbl_unit.width / 2, cy - lbl_val.height / 2 - dp(6))
-        self.add_widget(lbl_unit)
+        self.add_widget(unit)
 
         # Стадия
-        if self.stage_text:
-            lbl_stage = Label(
-                text=self.stage_text,
-                font_size=sp(12),
-                bold=True,
-                color=CYAN,
-                size_hint=(None, None),
-            )
-            lbl_stage.texture_update()
-            lbl_stage.size = lbl_stage.texture_size
-            lbl_stage.pos  = (cx - lbl_stage.width / 2, cy + r * 0.55)
-            self.add_widget(lbl_stage)
+        stage_color = {
+            'PING':     C_WHITE,
+            'DOWNLOAD': C_CYAN,
+            'UPLOAD':   C_GREEN,
+            'READY':    C_MUTED,
+            'DONE':     C_GREEN,
+            'ERROR':    C_ERROR,
+        }.get(self.stage_text, C_WHITE)
 
-    def animate_to(self, target_speed, display_text=None, unit="Mbps", stage=""):
-        Animation.cancel_all(self, "speed_value")
-        anim = Animation(speed_value=target_speed, duration=0.45, t="out_quad")
-        anim.start(self)
-        self.unit_text    = unit
-        self.stage_text   = stage
-        if display_text is not None:
-            self.display_text = display_text
-
-    def reset(self):
-        Animation.cancel_all(self, "speed_value")
-        self.speed_value  = 0
-        self.display_text = "0.00"
-        self.unit_text    = "Mbps"
-        self.stage_text   = ""
+        stg = Label(
+            text=self.stage_text,
+            font_size=sp(12),
+            color=stage_color,
+            size_hint=(None, None),
+            size=(r * 1.6, dp(20)),
+            pos=(cx - r * 0.8, cy - dp(46)),
+        )
+        self.add_widget(stg)
 
 
-# ══════════════════════════════════════════════
-# Прогресс-бар
-# ══════════════════════════════════════════════
-class NeonProgressBar(Widget):
-    value = NumericProperty(0)  # 0..100
+# ══════════════════════════════════════════════════════
+#  Карточка
+# ══════════════════════════════════════════════════════
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.bind(pos=self._draw, size=self._draw, value=self._draw)
+class InfoCard(BoxLayout):
+    """Тёмная карточка с иконкой-символом, заголовком и значением."""
+
+    def __init__(self, icon: str, title: str, value: str = '—', **kw):
+        super().__init__(orientation='vertical',
+                         padding=dp(12), spacing=dp(4),
+                         size_hint_y=None, height=dp(72), **kw)
+        self._icon_ch  = icon
+        self._title_ch = title
+        self.val_label = None
+        self._build(value)
+        self.bind(size=self._draw_bg, pos=self._draw_bg)
+
+    def _build(self, value):
+        top = BoxLayout(size_hint_y=None, height=dp(20), spacing=dp(6))
+        top.add_widget(Label(
+            text=self._icon_ch, font_size=sp(14),
+            color=C_CYAN, size_hint_x=None, width=dp(20),
+            halign='left', valign='middle',
+        ))
+        top.add_widget(Label(
+            text=self._title_ch, font_size=sp(11),
+            color=C_MUTED, halign='left', valign='middle',
+        ))
+        self.add_widget(top)
+
+        self.val_label = Label(
+            text=value, font_size=sp(15),
+            color=C_WHITE, bold=True,
+            halign='left', valign='middle',
+        )
+        self.val_label.bind(size=self.val_label.setter('text_size'))
+        self.add_widget(self.val_label)
+
+    def set_value(self, v: str):
+        if self.val_label:
+            self.val_label.text = v
+
+    def _draw_bg(self, *_):
+        self.canvas.before.clear()
+        with self.canvas.before:
+            Color(*C_CARD)
+            RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(12)])
+
+
+# ══════════════════════════════════════════════════════
+#  Карточка результата теста
+# ══════════════════════════════════════════════════════
+
+class ResultCard(BoxLayout):
+    def __init__(self, icon, title, **kw):
+        super().__init__(orientation='vertical',
+                         padding=dp(10), spacing=dp(2),
+                         size_hint_y=None, height=dp(80), **kw)
+        self.val_label = None
+        self._build(icon, title)
+        self.bind(size=self._draw_bg, pos=self._draw_bg)
+
+    def _build(self, icon, title):
+        self.add_widget(Label(
+            text=icon, font_size=sp(20), color=C_CYAN,
+            size_hint_y=None, height=dp(26),
+        ))
+        self.val_label = Label(
+            text='—', font_size=sp(20), bold=True, color=C_WHITE,
+            size_hint_y=None, height=dp(28),
+        )
+        self.add_widget(self.val_label)
+        self.add_widget(Label(
+            text=title, font_size=sp(10), color=C_MUTED,
+            size_hint_y=None, height=dp(16),
+        ))
+
+    def set_value(self, v: str):
+        if self.val_label:
+            self.val_label.text = v
+
+    def _draw_bg(self, *_):
+        self.canvas.before.clear()
+        with self.canvas.before:
+            Color(*C_CARD)
+            RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(10)])
+
+
+# ══════════════════════════════════════════════════════
+#  Кнопка Start
+# ══════════════════════════════════════════════════════
+
+class StartButton(Widget):
+    active = BooleanProperty(True)
+
+    def __init__(self, on_press_cb, **kw):
+        super().__init__(size_hint=(None, None),
+                         size=(dp(130), dp(130)), **kw)
+        self._cb       = on_press_cb
+        self._glow_a   = 1.0
+        self._glow_dir = -1
+        self._pulse    = None
+        self.bind(size=self._draw, pos=self._draw, active=self._draw)
+        Clock.schedule_once(self._start_pulse, 0.5)
+
+    def _start_pulse(self, *_):
+        self._pulse = Clock.schedule_interval(self._update_pulse, 0.05)
+
+    def _update_pulse(self, *_):
+        if not self.active:
+            return
+        self._glow_a += self._glow_dir * 0.03
+        if self._glow_a <= 0.3:
+            self._glow_dir = 1
+        elif self._glow_a >= 1.0:
+            self._glow_dir = -1
+        self._draw()
 
     def _draw(self, *_):
         self.canvas.clear()
+        cx, cy = self.center_x, self.center_y
+        r = dp(55)
         with self.canvas:
-            # Фон
-            Color(1, 1, 1, 0.07)
-            RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(4)])
-            # Заполнение
-            if self.value > 0:
-                Color(*CYAN)
-                fill_w = self.width * self.value / 100
-                RoundedRectangle(
-                    pos=self.pos,
-                    size=(fill_w, self.height),
-                    radius=[dp(4)],
-                )
+            # glow
+            if self.active:
+                Color(*C_CYAN[:3], self._glow_a * 0.3)
+                Ellipse(pos=(cx - r - dp(12), cy - r - dp(12)),
+                        size=((r + dp(12)) * 2, (r + dp(12)) * 2))
+            # circle
+            col = C_CYAN if self.active else C_MUTED
+            Color(*col)
+            Ellipse(pos=(cx - r, cy - r), size=(r * 2, r * 2))
+            # inner
+            Color(*C_BG)
+            ir = r - dp(4)
+            Ellipse(pos=(cx - ir, cy - ir), size=(ir * 2, ir * 2))
 
-    def animate_to(self, val):
-        Animation.cancel_all(self, "value")
-        Animation(value=val, duration=0.4, t="out_quad").start(self)
-
-
-# ══════════════════════════════════════════════
-# Строка информации (метка + значение)
-# ══════════════════════════════════════════════
-class InfoRow(BoxLayout):
-    def __init__(self, icon, title, value_prop, app, **kwargs):
-        super().__init__(
-            orientation="horizontal",
-            size_hint_y=None,
-            height=dp(28),
-            spacing=dp(8),
-            **kwargs,
+        self.clear_widgets()
+        txt  = 'START' if self.active else '...'
+        tclr = C_CYAN  if self.active else C_MUTED
+        lbl = Label(
+            text=txt, font_size=sp(16), bold=True, color=tclr,
+            size_hint=(None, None), size=(dp(130), dp(30)),
+            pos=(cx - dp(65), cy - dp(15)),
         )
-        lbl_title = Label(
-            text=f"{icon}  {title}",
-            color=MUTED,
-            font_size=sp(13),
-            size_hint_x=0.38,
-            halign="left",
-            valign="middle",
-        )
-        lbl_title.bind(size=lbl_title.setter("text_size"))
-        self.add_widget(lbl_title)
+        self.add_widget(lbl)
 
-        self._val_label = Label(
-            text=getattr(app, value_prop),
-            color=WHITE,
-            font_size=sp(13),
-            bold=True,
-            size_hint_x=0.62,
-            halign="left",
-            valign="middle",
-        )
-        self._val_label.bind(size=self._val_label.setter("text_size"))
-        self.add_widget(self._val_label)
-
-        # Подписка на изменение свойства
-        app.bind(**{value_prop: self._on_prop})
-
-    def _on_prop(self, _, value):
-        self._val_label.text = value
+    def on_touch_down(self, touch):
+        if self.collide_point(*touch.pos) and self.active:
+            self._cb()
+            return True
+        return super().on_touch_down(touch)
 
 
-# ══════════════════════════════════════════════
-# Мини-карточка результата (Download / Upload / Ping)
-# ══════════════════════════════════════════════
-class ResultCard(Card):
-    def __init__(self, icon, title, title_color, value_prop, unit, app, **kwargs):
-        super().__init__(**kwargs)
-        self.size_hint_y = None
-        self.height = dp(90)
+# ══════════════════════════════════════════════════════
+#  Главный экран
+# ══════════════════════════════════════════════════════
 
-        lbl_icon = Label(
-            text=f"{icon} {title}",
-            color=title_color,
-            font_size=sp(11),
-            bold=True,
-            size_hint_y=None,
-            height=dp(18),
-            halign="center",
-            valign="middle",
-        )
-        lbl_icon.bind(size=lbl_icon.setter("text_size"))
-        self.add_widget(lbl_icon)
+class MainScreen(FloatLayout):
 
-        self._val = Label(
-            text=getattr(app, value_prop),
-            color=WHITE,
-            font_size=sp(26),
-            bold=True,
-            size_hint_y=None,
-            height=dp(36),
-            halign="center",
-            valign="middle",
-        )
-        self._val.bind(size=self._val.setter("text_size"))
-        self.add_widget(self._val)
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._stop_event = threading.Event()
+        self._testing    = False
+        self._results    = {'ping': None, 'dl': None, 'ul': None}
+        self._build_ui()
+        Clock.schedule_once(self._load_ip_info, 0.8)
 
-        lbl_unit = Label(
-            text=unit,
-            color=MUTED,
-            font_size=sp(11),
-            size_hint_y=None,
-            height=dp(16),
-            halign="center",
-            valign="middle",
-        )
-        lbl_unit.bind(size=lbl_unit.setter("text_size"))
-        self.add_widget(lbl_unit)
+    # ── Построение UI ─────────────────────────────────
 
-        app.bind(**{value_prop: self._on_prop})
-
-    def _on_prop(self, _, value):
-        self._val.text = value
-
-
-# ══════════════════════════════════════════════
-# Кнопка Start
-# ══════════════════════════════════════════════
-class StartButton(Button):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.background_normal  = ""
-        self.background_color   = (0, 0, 0, 0)
-        self.color              = BTN_TEXT
-        self.font_size          = sp(17)
-        self.bold               = True
-        self.size_hint          = (0.85, None)
-        self.height             = dp(58)
-        with self.canvas.before:
-            self._btn_color = Color(*CYAN)
-            self._btn_rect  = RoundedRectangle(
-                pos=self.pos, size=self.size, radius=[dp(30)]
-            )
-        self.bind(pos=self._upd, size=self._upd, disabled=self._upd_color)
-
-    def _upd(self, *_):
-        self._btn_rect.pos  = self.pos
-        self._btn_rect.size = self.size
-
-    def _upd_color(self, _, disabled):
-        if disabled:
-            self._btn_color.rgba = (0.3, 0.3, 0.3, 0.6)
-        else:
-            self._btn_color.rgba = CYAN
-
-
-# ══════════════════════════════════════════════
-# Главный экран
-# ══════════════════════════════════════════════
-class MainScreen(ScrollView):
-    pass
-
-
-# ══════════════════════════════════════════════
-# Приложение
-# ══════════════════════════════════════════════
-class SpeedTestProApp(App):
-    # Данные
-    ip_address     = StringProperty("Загрузка...")
-    country        = StringProperty("Загрузка...")
-    city           = StringProperty("Загрузка...")
-    isp            = StringProperty("Загрузка...")
-    region         = StringProperty("Загрузка...")
-    status_text    = StringProperty("Готов к тестированию")
-    download_speed = StringProperty("—")
-    upload_speed   = StringProperty("—")
-    ping_value     = StringProperty("—")
-    is_testing     = BooleanProperty(False)
-
-    def build(self):
-        Window.clearcolor = BG
-        self.title = "Speed Test Pro"
-        return self._build_ui()
-
-    # ──────────────────────────────
-    # Построение UI
-    # ──────────────────────────────
     def _build_ui(self):
-        root = ScrollView(do_scroll_x=False)
+        with self.canvas.before:
+            Color(*C_BG)
+            self._bg_rect = Rectangle(pos=self.pos, size=self.size)
+        self.bind(size=self._upd_bg, pos=self._upd_bg)
 
-        outer = BoxLayout(
-            orientation="vertical",
-            size_hint_y=None,
-            padding=[dp(16), dp(30), dp(16), dp(30)],
-            spacing=dp(14),
+        root = BoxLayout(
+            orientation='vertical',
+            padding=dp(16), spacing=dp(12),
+            size_hint=(1, 1),
         )
-        outer.bind(minimum_height=outer.setter("height"))
-        root.add_widget(outer)
 
-        # --- Заголовок ---
-        lbl_title = Label(
-            text="⚡ SPEED TEST PRO",
-            font_size=sp(26),
-            bold=True,
-            color=CYAN,
-            size_hint_y=None,
-            height=dp(40),
-            halign="center",
+        # ── заголовок ─────────────────────────────────
+        title = Label(
+            text='[b]NetSpeed[/b] [color=#00D9FF]Pro[/color]',
+            markup=True,
+            font_size=sp(22),
+            color=C_WHITE,
+            size_hint_y=None, height=dp(40),
         )
-        lbl_title.bind(size=lbl_title.setter("text_size"))
-        outer.add_widget(lbl_title)
+        root.add_widget(title)
 
-        lbl_sub = Label(
-            text="Проверка скорости интернета",
-            font_size=sp(13),
-            color=MUTED,
-            size_hint_y=None,
-            height=dp(22),
-            halign="center",
+        # ── Gauge + кнопка ────────────────────────────
+        gauge_box = FloatLayout(size_hint_y=None, height=dp(230))
+
+        self.gauge = GaugeWidget(
+            size_hint=(None, None), size=(dp(210), dp(210)),
+            pos_hint={'center_x': 0.5, 'center_y': 0.5},
         )
-        lbl_sub.bind(size=lbl_sub.setter("text_size"))
-        outer.add_widget(lbl_sub)
+        gauge_box.add_widget(self.gauge)
 
-        # --- Gauge ---
-        self.gauge = SpeedGauge(size_hint_y=None, height=dp(210))
-        outer.add_widget(self.gauge)
-
-        # --- Статус ---
-        self._status_lbl = Label(
-            text=self.status_text,
-            font_size=sp(14),
-            bold=True,
-            color=CYAN,
-            size_hint_y=None,
-            height=dp(26),
-            halign="center",
+        self.start_btn = StartButton(
+            on_press_cb=self._on_start,
+            pos_hint={'center_x': 0.5, 'y': 0.02},
         )
-        self._status_lbl.bind(size=self._status_lbl.setter("text_size"))
-        outer.add_widget(self._status_lbl)
-        self.bind(status_text=lambda _, v: setattr(self._status_lbl, "text", v))
+        # Кнопка будет снизу gauge_box — делаем отдельно
+        root.add_widget(gauge_box)
 
-        # --- Progress bar ---
-        self.progress = NeonProgressBar(size_hint_y=None, height=dp(6))
-        outer.add_widget(self.progress)
+        # ── Кнопка Start ──────────────────────────────
+        btn_wrap = FloatLayout(size_hint_y=None, height=dp(140))
+        self.start_btn = StartButton(
+            on_press_cb=self._on_start,
+            pos_hint={'center_x': 0.5, 'center_y': 0.5},
+        )
+        btn_wrap.add_widget(self.start_btn)
+        root.add_widget(btn_wrap)
 
-        outer.add_widget(Widget(size_hint_y=None, height=dp(4)))
+        # ── Статус ────────────────────────────────────
+        self.status_lbl = Label(
+            text='Нажмите START для начала теста',
+            font_size=sp(12), color=C_MUTED,
+            size_hint_y=None, height=dp(22),
+        )
+        root.add_widget(self.status_lbl)
 
-        # --- Карточки результатов ---
-        row_cards = BoxLayout(
-            orientation="horizontal",
-            size_hint_y=None,
-            height=dp(90),
+        # ── Результаты ping/dl/ul ─────────────────────
+        res_row = BoxLayout(
+            orientation='horizontal',
             spacing=dp(8),
+            size_hint_y=None, height=dp(90),
         )
-        row_cards.add_widget(
-            ResultCard("⬇", "DOWNLOAD", GREEN,  "download_speed", "Mbps", self)
-        )
-        row_cards.add_widget(
-            ResultCard("⬆", "UPLOAD",   CYAN,   "upload_speed",   "Mbps", self)
-        )
-        row_cards.add_widget(
-            ResultCard("📶", "PING",    ORANGE, "ping_value",     "ms",   self)
-        )
-        outer.add_widget(row_cards)
+        self.card_ping = ResultCard('◎', 'PING  ms')
+        self.card_dl   = ResultCard('↓', 'DOWNLOAD Mbps')
+        self.card_ul   = ResultCard('↑', 'UPLOAD Mbps')
+        res_row.add_widget(self.card_ping)
+        res_row.add_widget(self.card_dl)
+        res_row.add_widget(self.card_ul)
+        root.add_widget(res_row)
 
-        # --- Кнопка ---
-        btn = StartButton(text="🚀  НАЧАТЬ ТЕСТ")
-        btn.pos_hint = {"center_x": 0.5}
-        btn.bind(on_release=lambda _: self.start_test())
-        self.bind(is_testing=lambda _, v: setattr(btn, "disabled", v))
-        outer.add_widget(btn)
+        # ── IP-инфо карточки ──────────────────────────
+        self.ip_lbl      = InfoCard('◉', 'IP-адрес',   'Загрузка...')
+        self.country_lbl = InfoCard('⚑', 'Страна',     'Загрузка...')
+        self.city_lbl    = InfoCard('⌖', 'Город',      'Загрузка...')
+        self.isp_lbl     = InfoCard('◈', 'Провайдер',  'Загрузка...')
 
-        outer.add_widget(Widget(size_hint_y=None, height=dp(8)))
+        for card in [self.ip_lbl, self.country_lbl,
+                     self.city_lbl, self.isp_lbl]:
+            root.add_widget(card)
 
-        # --- Карточка IP-информации ---
-        ip_card = Card(size_hint_y=None, height=dp(170))
-        ip_title = Label(
-            text="🌐  Информация о соединении",
-            font_size=sp(14),
-            bold=True,
-            color=CYAN,
-            size_hint_y=None,
-            height=dp(22),
-            halign="left",
-        )
-        ip_title.bind(size=ip_title.setter("text_size"))
-        ip_card.add_widget(ip_title)
-        ip_card.add_widget(Widget(size_hint_y=None, height=dp(4)))
+        self.add_widget(root)
 
-        for icon, title, prop in [
-            ("🔹", "IP адрес",  "ip_address"),
-            ("🏳", "Страна",    "country"),
-            ("🏙", "Город",     "city"),
-            ("📡", "Провайдер", "isp"),
-            ("📍", "Регион",    "region"),
-        ]:
-            ip_card.add_widget(InfoRow(icon, title, prop, self))
+    def _upd_bg(self, *_):
+        self._bg_rect.pos  = self.pos
+        self._bg_rect.size = self.size
 
-        outer.add_widget(ip_card)
+    # ── IP-инфо ───────────────────────────────────────
 
-        # --- Футер ---
-        lbl_footer = Label(
-            text="Made with ❤  in Python | v2.0",
-            font_size=sp(11),
-            color=(0.3, 0.35, 0.42, 1),
-            size_hint_y=None,
-            height=dp(20),
-            halign="center",
-        )
-        lbl_footer.bind(size=lbl_footer.setter("text_size"))
-        outer.add_widget(lbl_footer)
+    def _load_ip_info(self, *_):
+        self._set_status('Определяем IP и местоположение...')
+        threading.Thread(target=self._thread_ip, daemon=True).start()
 
-        return root
+    def _thread_ip(self):
+        info = fetch_ip_info()
+        Clock.schedule_once(lambda dt: self._apply_ip(info), 0)
 
-    def on_start(self):
-        threading.Thread(target=self._fetch_ip_info, daemon=True).start()
+    def _apply_ip(self, info: dict):
+        self.ip_lbl.set_value(info['ip'])
+        self.country_lbl.set_value(
+            f"{info['country']}  {info['region']}")
+        self.city_lbl.set_value(info['city'])
+        self.isp_lbl.set_value(info['isp'])
+        if info['ip'] == '—':
+            self._set_status('Не удалось получить данные. Проверьте интернет.')
+        else:
+            self._set_status('Нажмите START для начала теста')
 
-    # ──────────────────────────────
-    # IP Info
-    # ──────────────────────────────
-    def _fetch_ip_info(self):
-        data = self._try_fetch_json(IP_API_PRIMARY)
-        if data and data.get("ip"):
-            Clock.schedule_once(lambda dt: self._apply_ip(data, "primary"))
+    # ── Speed test ────────────────────────────────────
+
+    def _on_start(self):
+        if self._testing:
             return
-        data = self._try_fetch_json(IP_API_SECONDARY)
-        if data and data.get("ip"):
-            Clock.schedule_once(lambda dt: self._apply_ip(data, "secondary"))
-            return
-        Clock.schedule_once(
-            lambda dt: self._safe_set(
-                ip_address="Нет соединения",
-                country="—", city="—", isp="—", region="—",
-            )
+        self._testing = True
+        self._stop_event.clear()
+        self.start_btn.active = False
+        self._results = {'ping': None, 'dl': None, 'ul': None}
+        self.card_ping.set_value('—')
+        self.card_dl.set_value('—')
+        self.card_ul.set_value('—')
+        self.gauge.speed_val  = 0
+        self.gauge.stage_text = 'PING'
+        self.gauge.unit_text  = 'ms'
+        self._set_status('Измерение Ping...')
+        threading.Thread(target=self._thread_test, daemon=True).start()
+
+    def _thread_test(self):
+        # ── 1. PING ───────────────────────────────────
+        ping_ms = best_ping()
+        self._results['ping'] = ping_ms
+        Clock.schedule_once(lambda dt: self._on_ping_done(ping_ms), 0)
+
+        # ── 2. DOWNLOAD ───────────────────────────────
+        Clock.schedule_once(lambda dt: self._pre_download(), 0)
+        time.sleep(0.15)
+
+        dl_mbps = measure_download(
+            cb_speed=lambda v: Clock.schedule_once(
+                lambda dt, vv=v: self._upd_gauge(vv, 'DOWNLOAD', 'Mbps'), 0),
+            stop_event=self._stop_event,
         )
+        self._results['dl'] = dl_mbps
+        Clock.schedule_once(lambda dt: self._on_dl_done(dl_mbps), 0)
 
-    def _try_fetch_json(self, url):
-        try:
-            ctx = ssl.create_default_context()
-            req = urllib.request.urlopen(url, timeout=10, context=ctx)
-            return json.loads(req.read().decode("utf-8", errors="replace"))
-        except Exception:
-            return None
+        # ── 3. UPLOAD ─────────────────────────────────
+        Clock.schedule_once(lambda dt: self._pre_upload(), 0)
+        time.sleep(0.15)
 
-    def _apply_ip(self, data, source):
-        if source == "primary":   # ipwho.is
-            self._safe_set(
-                ip_address = data.get("ip", "—"),
-                country    = data.get("country", "—"),
-                city       = data.get("city", "—"),
-                isp        = data.get("connection", {}).get("org", "—"),
-                region     = data.get("region", "—"),
-            )
-        else:                     # ipapi.co
-            self._safe_set(
-                ip_address = data.get("ip", "—"),
-                country    = data.get("country_name", "—"),
-                city       = data.get("city", "—"),
-                isp        = data.get("org", "—"),
-                region     = data.get("region", "—"),
-            )
-
-    # ──────────────────────────────
-    # Speed test
-    # ──────────────────────────────
-    def start_test(self):
-        if self.is_testing:
-            return
-        self.is_testing = True
-        self._safe_set(
-            download_speed="...",
-            upload_speed="...",
-            ping_value="...",
-            status_text="Подготовка...",
+        ul_mbps = measure_upload(
+            cb_speed=lambda v: Clock.schedule_once(
+                lambda dt, vv=v: self._upd_gauge(vv, 'UPLOAD', 'Mbps'), 0),
+            stop_event=self._stop_event,
         )
-        self.gauge.reset()
-        self.progress.value = 0
-        threading.Thread(target=self._run_test, daemon=True).start()
+        self._results['ul'] = ul_mbps
+        Clock.schedule_once(lambda dt: self._on_done(), 0)
 
-    def _run_test(self):
-        try:
-            # 1. PING
-            self._ui(status_text="📶  Измерение пинга...")
-            ping = self._test_ping()
-            ping_str = str(ping) if ping > 0 else "—"
-            self._ui(ping_value=ping_str)
-            Clock.schedule_once(lambda dt: self.gauge.animate_to(
-                min(ping, 200), display_text=ping_str, unit="ms", stage="PING"
-            ))
-            Clock.schedule_once(lambda dt: self.progress.animate_to(20))
-            time.sleep(0.6)
+    # ── UI callbacks (main thread) ────────────────────
 
-            # 2. DOWNLOAD
-            self._ui(status_text="⬇  Загрузка...")
-            Clock.schedule_once(lambda dt: self.gauge.animate_to(
-                0, display_text="0.00", unit="Mbps", stage="DOWNLOAD"
-            ))
-            dl = self._test_download()
-            dl_str = f"{dl:.2f}"
-            self._ui(download_speed=dl_str)
-            Clock.schedule_once(lambda dt: self.gauge.animate_to(
-                dl, display_text=dl_str, unit="Mbps", stage="DOWNLOAD ✓"
-            ))
-            Clock.schedule_once(lambda dt: self.progress.animate_to(60))
-            time.sleep(0.6)
+    def _on_ping_done(self, ms: float):
+        txt = f'{ms:.0f}' if ms > 0 else '—'
+        self.card_ping.set_value(txt)
+        self.gauge.stage_text = 'PING'
+        self.gauge.unit_text  = 'ms'
+        self.gauge.max_val    = 300
+        if ms > 0:
+            anim = Animation(speed_val=ms, duration=0.5)
+            anim.start(self.gauge)
 
-            # 3. UPLOAD
-            self._ui(status_text="⬆  Отдача...")
-            Clock.schedule_once(lambda dt: self.gauge.animate_to(
-                0, display_text="0.00", unit="Mbps", stage="UPLOAD"
-            ))
-            ul = self._test_upload()
-            ul_str = f"{ul:.2f}"
-            self._ui(upload_speed=ul_str)
-            Clock.schedule_once(lambda dt: self.gauge.animate_to(
-                ul, display_text=ul_str, unit="Mbps", stage="UPLOAD ✓"
-            ))
-            Clock.schedule_once(lambda dt: self.progress.animate_to(100))
+    def _pre_download(self):
+        self._set_status('Измерение скорости загрузки...')
+        self.gauge.speed_val  = 0
+        self.gauge.stage_text = 'DOWNLOAD'
+        self.gauge.unit_text  = 'Mbps'
+        self.gauge.max_val    = 150
 
-            self._ui(status_text="✅  Тест завершён!")
+    def _on_dl_done(self, mbps: float):
+        txt = f'{mbps:.1f}' if mbps > 0 else '—'
+        self.card_dl.set_value(txt)
 
-        except Exception as exc:
-            import traceback
-            traceback.print_exc()   # только в лог
-            self._ui(status_text="❌  Ошибка теста. Попробуйте снова.")
-        finally:
-            self._ui(is_testing=False)
+    def _pre_upload(self):
+        self._set_status('Измерение скорости отдачи...')
+        self.gauge.speed_val  = 0
+        self.gauge.stage_text = 'UPLOAD'
+        self.gauge.unit_text  = 'Mbps'
+        self.gauge.max_val    = 100
 
-    # ──────────────────────────────
-    # Ping
-    # ──────────────────────────────
-    def _test_ping(self):
-        results = []
-        for _ in range(5):
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(4)
-                t0 = time.time()
-                sock.connect(("8.8.8.8", 53))
-                results.append((time.time() - t0) * 1000)
-                sock.close()
-            except Exception:
-                pass
-        return round(min(results)) if results else 0
+    def _on_done(self):
+        self._testing = False
+        self.start_btn.active = True
+        self.gauge.stage_text = 'DONE'
 
-    # ──────────────────────────────
-    # Download — реальный, с live-обновлением
-    # ──────────────────────────────
-    def _test_download(self):
-        total_bytes = 0
-        start_time  = time.time()
-        limit_secs  = 10        # максимальная длительность
-        limit_bytes = 20 * 1024 * 1024  # 20 МБ
+        p  = self._results['ping']
+        dl = self._results['dl']
+        ul = self._results['ul']
 
-        for url in DOWNLOAD_URLS:
-            if time.time() - start_time > limit_secs:
-                break
-            try:
-                ctx = ssl.create_default_context()
-                resp = urllib.request.urlopen(url, timeout=12, context=ctx)
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    total_bytes += len(chunk)
-                    elapsed = time.time() - start_time
-                    if elapsed > 0:
-                        speed = (total_bytes * 8) / (elapsed * 1_000_000)
-                        spd_str = f"{speed:.2f}"
-                        # live gauge
-                        def _upd_dl(dt, s=speed, ss=spd_str):
-                            self.gauge.animate_to(
-                                s, display_text=ss, unit="Mbps", stage="DOWNLOAD"
-                            )
-                            # прогресс 20→60
-                            frac = min(elapsed / limit_secs, 1)
-                            self.progress.animate_to(20 + 40 * frac)
-                        Clock.schedule_once(_upd_dl)
-                    if total_bytes >= limit_bytes:
-                        break
-                    if time.time() - start_time > limit_secs:
-                        break
-            except Exception:
-                pass
+        if dl is not None and dl > 0:
+            anim = Animation(speed_val=dl, duration=0.6)
+            anim.start(self.gauge)
+            self.card_dl.set_value(f'{dl:.1f}')
+        if ul is not None:
+            self.card_ul.set_value(f'{ul:.1f}' if ul > 0 else '—')
 
-        elapsed = time.time() - start_time
-        if elapsed == 0 or total_bytes == 0:
-            return 0.0
-        return (total_bytes * 8) / (elapsed * 1_000_000)
+        ok = any(v and v > 0 for v in [p, dl, ul])
+        if ok:
+            self._set_status('Тест завершён ✓')
+        else:
+            self.gauge.stage_text = 'ERROR'
+            self._set_status('Не удалось выполнить тест. Проверьте интернет.')
 
-    # ──────────────────────────────
-    # Upload — POST на httpbin.org (реальный TCP upload)
-    # ──────────────────────────────
-    def _test_upload(self):
-        data_size = 3 * 1024 * 1024   # 3 МБ — баланс скорости и времени
-        payload   = b"\x00" * data_size
-        start     = time.time()
-        success   = False
-        try:
-            ctx = ssl.create_default_context()
-            req = urllib.request.Request(
-                UPLOAD_URL,
-                data=payload,
-                method="POST",
-                headers={"Content-Type": "application/octet-stream"},
-            )
-            urllib.request.urlopen(req, timeout=20, context=ctx)
-            success = True
-        except Exception:
-            pass
+    def _upd_gauge(self, val: float, stage: str, unit: str):
+        self.gauge.stage_text = stage
+        self.gauge.unit_text  = unit
+        anim = Animation(speed_val=val, duration=0.25)
+        anim.start(self.gauge)
 
-        elapsed = time.time() - start
-        if not success or elapsed == 0:
-            return 0.0
-        return (data_size * 8) / (elapsed * 1_000_000)
-
-    # ──────────────────────────────
-    # Helpers
-    # ──────────────────────────────
-    def _ui(self, **kwargs):
-        """Безопасное обновление свойств из потока."""
-        def _do(dt):
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-        Clock.schedule_once(_do)
-
-    def _safe_set(self, **kwargs):
-        for k, v in kwargs.items():
-            setattr(self, k, v)
+    def _set_status(self, text: str):
+        self.status_lbl.text = text
 
 
-if __name__ == "__main__":
-    SpeedTestProApp().run()
+# ══════════════════════════════════════════════════════
+#  App
+# ══════════════════════════════════════════════════════
+
+class NetSpeedApp(App):
+    def build(self):
+        self.title = 'NetSpeed Pro'
+        return MainScreen()
+
+    def on_stop(self):
+        # Останавливаем поток при закрытии
+        screen = self.root
+        if hasattr(screen, '_stop_event'):
+            screen._stop_event.set()
+
+
+if __name__ == '__main__':
+    NetSpeedApp().run()
