@@ -38,11 +38,9 @@ jobs:
 
       - name: Set up Android SDK inside buildozer directory
         run: |
-          # Именно сюда buildozer смотрит — создаём SDK здесь
           BSDK="$HOME/.buildozer/android/platform/android-sdk"
           mkdir -p "$BSDK/cmdline-tools"
 
-          # Скачиваем command-line tools
           wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdline-tools.zip
           unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdtools
           mv /tmp/cmdtools/cmdline-tools "$BSDK/cmdline-tools/latest"
@@ -56,19 +54,28 @@ jobs:
           printf '\nd975f751698a77b662f1254ddbeed3901e976f5a' \
             > "$BSDK/licenses/android-sdk-preview-license"
 
-          # Устанавливаем нужные пакеты
+          # Устанавливаем пакеты включая build-tools 33.0.2
           "$SDKMANAGER" --sdk_root="$BSDK" \
             "platform-tools" \
             "platforms;android-33" \
             "build-tools;33.0.2"
 
-          # Создаём симлинк tools/bin/sdkmanager — именно этот путь ищет buildozer
+          # Симлинк для старого пути который ищет buildozer
           mkdir -p "$BSDK/tools/bin"
           ln -sf "$SDKMANAGER" "$BSDK/tools/bin/sdkmanager"
 
-          echo "SDK setup done:"
+          # КЛЮЧЕВОЕ: создаём алиас папки build-tools чтобы buildozer
+          # нашёл aidl и не лез в sdkmanager за новой версией
+          # Buildozer ищет aidl в build-tools/*/aidl
+          # Создаём папку с именем 37.0.0 которую он ожидает, но внутри — реальные файлы от 33.0.2
+          if [ -d "$BSDK/build-tools/33.0.2" ]; then
+            cp -r "$BSDK/build-tools/33.0.2" "$BSDK/build-tools/37.0.0"
+            echo "Created build-tools/37.0.0 alias from 33.0.2"
+            ls "$BSDK/build-tools/37.0.0/" | grep aidl
+          fi
+
+          echo "SDK layout:"
           ls "$BSDK/"
-          ls "$BSDK/tools/bin/"
 
       - name: Cache .buildozer
         uses: actions/cache@v4
