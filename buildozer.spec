@@ -8,7 +8,7 @@ source.include_exts = py,png,jpg,kv,atlas
 
 version = 1.0
 
-requirements = python3,kivy,requests,speedtest-cli
+requirements = python3,kivy,requests,plyer
 
 orientation = portrait
 fullscreen = 0
