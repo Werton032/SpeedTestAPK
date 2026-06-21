@@ -4,9 +4,8 @@ package.name = speedtestpro
 package.domain = org.test
 
 source.dir = .
-source.include_exts = py,png,jpg,kv,atlas
-
-version = 1.2
+source.include_exts = py,png,jpg,jpeg,kv,atlas
+version = 1.3
 
 requirements = python3,kivy,pyjnius
 
